@@ -12,6 +12,9 @@ RUN ./gradlew dependencies --no-daemon || true
 
 # 나머지 소스코드 복사 후 빌드
 COPY src src
+# gradle-git-properties 플러그인이 커밋 정보를 읽으려면 .git이 빌드 컨텍스트에 있어야 함 -
+# 멀티스테이지 빌드라 최종 런타임 이미지엔 안 남음
+COPY .git .git
 RUN ./gradlew bootJar --no-daemon
 
 # --- 2단계: 런타임 ---
