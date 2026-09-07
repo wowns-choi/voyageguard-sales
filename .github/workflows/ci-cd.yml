@@ -1,0 +1,83 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: gradlew 실행권한 부여
+        run: chmod +x gradlew
+
+      - name: 테스트 실행
+        run: ./gradlew test
+
+  # main에 머지된 커밋만 이미지로 빌드/푸시 (PR 단계에선 빌드 안 함)
+  docker:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 이미지 태그 결정 (커밋 SHA 7자리)
+        id: tag
+        run: echo "value=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Docker Hub 로그인
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 이미지 빌드 및 푸시
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            choijaejun/voyageguard-sales:latest
+            choijaejun/voyageguard-sales:${{ steps.tag.outputs.value }}
+
+  # 새로 푸시한 이미지 태그로 허브 레포(voyageguard, GitOps 대상)의 매니페스트를 갱신 -
+  # ArgoCD가 이 커밋을 감지해서 자동 배포함. GITOPS_PAT은 허브 레포 write 권한을 가진
+  # Personal Access Token (repo 시크릿으로 등록 필요).
+  bump-manifest:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: 허브 레포(voyageguard) 체크아웃
+        uses: actions/checkout@v4
+        with:
+          repository: wowns-choi/voyageguard
+          token: ${{ secrets.GITOPS_PAT }}
+
+      - name: k8s 매니페스트 이미지 태그 갱신
+        run: |
+          sed -i "s|choijaejun/voyageguard-sales:.*|choijaejun/voyageguard-sales:${{ needs.docker.outputs.image_tag }}|" k8s/sales.yaml
+
+      - name: 변경사항 커밋 및 푸시
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "이미지 태그 변경 없음, 커밋 스킵"
+            exit 0
+          fi
+          git add k8s/sales.yaml
+          git commit -m "chore: sales 이미지 태그를 ${{ needs.docker.outputs.image_tag }}로 갱신"
+          git push
